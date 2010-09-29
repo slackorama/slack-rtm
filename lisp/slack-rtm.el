@@ -77,24 +77,30 @@
   "Add the task to Remember The Milk."
   (let ((title (slack-rtm-task-title task))
         (priority (slack-rtm-task-priority task))
-        (deadline (slack-rtm-task-deadline task)))
-    (slack-rtm-task-quickadd
-     (concat
-      title
-      (when deadline
-        (concat " ^" deadline " "))
-      (when priority
-        (concat " !"
-                (cond
-                 ((equal priority "[#A]")
-                   "1")
-                 ((equal priority "[#B]")
-                   "2")                 
-                 ((equal priority "[#C]")
-                   "3"))))))))
+        (deadline (slack-rtm-task-deadline task))
+        (tags (slack-rtm-task-tags task)))
+    
+    (if (not (null title))
+        (slack-rtm-task-quickadd
+         (concat
+          title
+          (when deadline
+            (concat " ^" deadline " "))
+          (when tags
+            (concat " #" (mapconcat 'identity tags " #")))
+          (when priority
+            (concat " !"
+                    (cond
+                     ((equal priority "[#A]")
+                      "1")
+                     ((equal priority "[#B]")
+                      "2")                 
+                     ((equal priority "[#C]")
+                      "3")))))))))
 
 (defun slack-rtm-parse-current-task ()
   "Extract the status and ID of the current task"
+;;;TODO: Handle repeating tasks
   (save-excursion
     (org-back-to-heading t)
     (when (and (looking-at org-complex-heading-regexp)
@@ -110,6 +116,9 @@
                                      "rtm-list-id"))
              (taskseries-id (org-entry-get (point)
                                            "rtm-taskseries-id")))
+        (if id (add-to-list 'info (cons "id" id)))
+        (when tags
+            (setq tags  (split-string tags ":" t)))
         (setq info
               (list
                (cons "id" id)
@@ -117,13 +126,13 @@
                (cons "taskseries-id" taskseries-id)
                (cons "title" title)
                (cons "priority" priority)
+               (cons "tags" tags)
                (cons "status" status)))
         (when (org-entry-get nil "DEADLINE")
           (setq info (cons (cons "deadline"
                                  (substring (org-entry-get nil "DEADLINE")
                                             0 10)) info)))
         info))))
-
 
 (defun slack-rtm-success-p (result)
   (let ((attrs (xml-node-attributes (assq 'transaction result))))
@@ -165,14 +174,12 @@
                 (delete-region
                (point)
                (if (and (end-of-line)
-
                         (re-search-forward org-complex-heading-regexp nil t))
                    (match-beginning 0)
                  (org-end-of-subtree t t)
                  (point)))
                 (message "Task deleted."))
             (message "Problem deleteing task.")))))))
-
 
 (defun slack-rtm-task-quickadd (text)
   "Quickly add a task to RTM"
@@ -293,6 +300,7 @@ by the rtm package. `rtm-tasks-get-list'"
 (slack-rtm-task-prop-defun "status")
 (slack-rtm-task-prop-defun "title")
 (slack-rtm-task-prop-defun "deadline")
+(slack-rtm-task-prop-defun "tags")
 
 (provide 'slack-rtm)
 
