@@ -62,13 +62,13 @@
   (let ((slack-buffer (generate-new-buffer slack-rtm-buffer-name))
         (task-list (slack-rtm-get-tasks query)))
     (with-current-buffer slack-buffer
-    (insert "* Remember The Milk -- " query "\n"
-            ":PROPERTIES:\n"
-            ":Last-query: " query "\n"            
-            ":Last-modified: TBD"  "\n"
-            ":Last-deleted: TBD"  "\n"
-            ":Last-sync: TBD"  "\n"
-            ":END:\n")
+      (insert "* Remember The Milk -- " query "\n"
+              ":PROPERTIES:\n"
+              ":Last-query: " query "\n"            
+              ":Last-modified: TBD"  "\n"
+              ":Last-deleted: TBD"  "\n"
+              ":Last-sync: TBD"  "\n"
+              ":END:\n")
       (insert (mapconcat 'slack-rtm-tasks-to-string task-list "\n"))      
       (display-buffer slack-buffer)
       (org-mode))))
@@ -99,7 +99,7 @@
                       "3")))))))))
 
 (defun slack-rtm-parse-current-task ()
-  "Extract the status and ID of the current task"
+  "Convert a task from org to the internal data structure"
 ;;;TODO: Handle repeating tasks
   (save-excursion
     (org-back-to-heading t)
@@ -111,14 +111,14 @@
              (title (match-string-no-properties 4))
              (tags (match-string-no-properties 5))
              (id (org-entry-get (point)
-                                 "rtm-task-id"))
+                                "rtm-task-id"))
              (list-id (org-entry-get (point)
                                      "rtm-list-id"))
              (taskseries-id (org-entry-get (point)
                                            "rtm-taskseries-id")))
         (if id (add-to-list 'info (cons "id" id)))
         (when tags
-            (setq tags  (split-string tags ":" t)))
+          (setq tags  (split-string tags ":" t)))
         (setq info
               (list
                (cons "id" id)
@@ -135,16 +135,27 @@
         info))))
 
 (defun slack-rtm-success-p (result)
+  "Did the transaction succeed?"
   (let ((attrs (xml-node-attributes (assq 'transaction result))))
     (and (not (null (cdr (assq 'id attrs))))
          (not (null (cdr (assq 'undoable attrs)))))))
 
-(defun slack-rtm-edit-task (task)
-  ;;;TODO: edit a task
-  nil)
-  
+(defun slack-rtm-push-task (task)
+;;; TODO: so many requests just to update???
+  (let ((list-id (slack-rtm-task-list-id task))
+        (taskseries-id (slack-rtm-task-taskseries-id task))
+        (id (slack-rtm-task-id task))
+        (tags (slack-rtm-task-tags task)))
+    (if (string= (slack-rtm-task-status task)
+                 "DONE")        
+        (rtm-tasks-complete list-id taskseries-id id)
+      (rtm-tasks-uncomplete list-id taskseries-id id))
+    (when tags
+      (rtm-tasks-set-tags list-id taskseries-id id
+                          (concat " #" (mapconcat 'identity tags " #"))))))
+
 (defun slack-rtm-sync-task (&optional force)
-  "Update RTM for the current task"
+  "Update RTM or add task for the current task"
   (interactive "P")
   (save-excursion
     (let ((task (slack-rtm-parse-current-task)))
@@ -153,9 +164,11 @@
           (let ((result (slack-rtm-add-task task)))
             (when (slack-rtm-success-p result)
               (slack-rtm-update-current-task result)
-              (message "Task added")))
-        (when (slack-rtm-success-p (slack-rtm-edit-task task))
-          (message "task update"))))))
+              (message "Task added.")))
+        (let ((result (slack-rtm-push-task task)))
+          (when (slack-rtm-success-p result)
+            (slack-rtm-update-current-task result)
+            (message "Task updated.")))))))
 
 (defun slack-rtm-delete-task ()
   "Delete the current task from RTM"
@@ -166,20 +179,20 @@
       (if (null (slack-rtm-task-id task))
           (message "Task not known by RTM")
         (let* ((task-id (slack-rtm-task-id task))
-              (taskseries-id (slack-rtm-task-taskseries-id task))
-              (list-id (slack-rtm-task-list-id task))
-              (result (rtm-tasks-delete list-id taskseries-id task-id)))
+               (taskseries-id (slack-rtm-task-taskseries-id task))
+               (list-id (slack-rtm-task-list-id task))
+               (result (rtm-tasks-delete list-id taskseries-id task-id)))
           (if (slack-rtm-success-p result)
               (progn
                 (delete-region
-               (point)
-               (if (and (end-of-line)
-                        (re-search-forward org-complex-heading-regexp nil t))
-                   (match-beginning 0)
-                 (org-end-of-subtree t t)
-                 (point)))
+                 (point)
+                 (if (and (end-of-line)
+                          (re-search-forward org-complex-heading-regexp nil t))
+                     (match-beginning 0)
+                   (org-end-of-subtree t t)
+                   (point)))
                 (message "Task deleted."))
-            (message "Problem deleteing task.")))))))
+            (message "Problem deleting task.")))))))
 
 (defun slack-rtm-task-quickadd (text)
   "Quickly add a task to RTM"
@@ -196,7 +209,7 @@ by the rtm package. `rtm-tasks-get-list'"
 
 (defun slack-rtm-taskseries-to-string (task-list taskseries &optional level)
   "Return a formatted of taskseries"
-;;         (task (car (xml-get-children taskseries 'task)))
+  ;;         (task (car (xml-get-children taskseries 'task)))
   (mapconcat (lambda (task)
                (slack-rtm-task-to-string task-list taskseries task level))
              (xml-get-children taskseries 'task)
@@ -214,9 +227,9 @@ by the rtm package. `rtm-tasks-get-list'"
             (slack-rtm-status-to-string task)
             " "
             (when (not (equal priority ""))
-                                    (concat " " priority " "))
-             name " "  (slack-rtm-taskseries-tags
-                                              taskseries)
+              (concat " " priority " "))
+            name " "  (slack-rtm-taskseries-tags
+                       taskseries)
             (if (not (equal due-date ""))
                 (concat "\n" org-deadline-string " "
                         (slack-rtm-format-date due-date)))
@@ -230,10 +243,11 @@ by the rtm package. `rtm-tasks-get-list'"
             ":PROPERTIES:\n"
             ":rtm-task-id: " (xml-get-attribute task 'id) "\n"
             ":rtm-taskseries-id: " (xml-get-attribute taskseries 'id) "\n"
-            ":rtm-list-id: "  list-id "\n"
-            ":modified: " (xml-get-attribute taskseries 'modified) "\n"
-            ":sync: " (format "%d" (float-time (current-time))) "\n"
-            ":END:\n"))
+            ":rtm-list-id: "  list-id "\n" 
+            ":modified: " (slack-rtm-fix-8601 (xml-get-attribute taskseries
+                                                                 'modified)) "\n"
+                                                                 ":sync: " (format "%d" (float-time (current-time))) "\n"
+                                                                 ":END:\n"))
   )
 
 (defun slack-rtm-taskseries-tags (taskseries)
@@ -241,14 +255,14 @@ by the rtm package. `rtm-tasks-get-list'"
                                 'tag)))
     (when tags
       (concat ":" (mapconcat (lambda (item)
-                   (concat (car (xml-node-children item))))
-                 tags ":" ) ":"))))
+                               (concat (car (xml-node-children item))))
+                             tags ":" ) ":"))))
 
 (defun slack-rtm-status-to-string (task)
   (let ((comp (xml-get-attribute task 'completed)))
     (cond
      ((equal comp "") "TODO")
-     (t "STARTED"))))
+     (t "DONE"))))
 
 (defun slack-rtm-format-date (date)
   "Return <yyyy-mm-dd day> for DATE"
@@ -258,7 +272,7 @@ by the rtm package. `rtm-tasks-get-list'"
     "%Y-%m-%d %a"
     (cond
      ((listp date)
-       date)
+      date)
      (t (apply 'encode-time (org-parse-time-string date)))))
    ">"))
 
@@ -271,9 +285,9 @@ by the rtm package. `rtm-tasks-get-list'"
 (defun slack-rtm-priority-to-org (rtm-priority)
   "Convert the RTM priority to an org priority."
   (cond
-   ((equal rtm-priority "1") "[#A]")
-   ((equal rtm-priority "2") "[#B]")
-   ((equal rtm-priority "3") "[#C]")
+   ((string= rtm-priority "1") "[#A]")
+   ((string= rtm-priority "2") "[#B]")
+   ((string= rtm-priority "3") "[#C]")
    (t "")))
 
 (defun slack-rtm-update-current-task (result)
@@ -284,14 +298,31 @@ by the rtm package. `rtm-tasks-get-list'"
     (org-entry-put (point) "rtm-list-id" (xml-get-attribute task-list 'id))
     (org-entry-put (point) "rtm-taskseries-id" (xml-get-attribute taskseries 'id))
     (org-entry-put (point) "rtm-task-id" (xml-get-attribute task 'id))
-    (org-entry-put (point) "modified" (xml-get-attribute taskseries
-  'modified))
+    (org-entry-put (point) "modified" (slack-rtm-fix-8601 (xml-get-attribute taskseries
+                                                                             'modified)))
     (org-entry-put (point)
-                    "sync" (format "%d" (float-time (current-time))))))
+                   "sync" (format "%d" (float-time (current-time))))))
+
+(defun slack-rtm-touch-task ()
+  "Update the current task's timestamp so that it's included in the next sync."
+  (interactive)
+  (org-entry-put (point) "modified" (format "%d" (float-time
+                                                  (current-time)))))
+
+(defun slack-rtm-fix-8601 (time-string)
+  "This is admittedly goofy and doesn't really 'fix' anything."
+  (let ((fixed-time-string
+         (replace-regexp-in-string "T" " "
+                                   (replace-regexp-in-string
+                                    "Z" " Z" time-string))))
+    (format "%d"
+            (float-time
+             (apply 'encode-time
+                    (parse-time-string fixed-time-string))))))
 
 (defmacro slack-rtm-task-prop-defun (field)
   `(defun ,(intern (concat "slack-rtm-task-" field)) (task)
-      (cdr (assoc ,field task))))
+     (cdr (assoc ,field task))))
 
 (slack-rtm-task-prop-defun "id")
 (slack-rtm-task-prop-defun "list-id")
