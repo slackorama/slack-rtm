@@ -36,6 +36,7 @@
 (require 'rtm)
 (require 'xml)
 (require 'org)
+(require 'ido)
 
 (defcustom slack-rtm-default-query "list:Inbox AND status:incomplete"
   "Query to use when getting lists from RTM."
@@ -62,12 +63,13 @@
   (let ((slack-buffer (generate-new-buffer slack-rtm-buffer-name))
         (task-list (slack-rtm-get-tasks query)))
     (with-current-buffer slack-buffer
-      (insert "* Remember The Milk -- " query "\n"
+      (insert "#+STARTUP: content\n\n"
+              "* Remember The Milk -- " query "\n"
               ":PROPERTIES:\n"
-              ":Last-query: " query "\n"            
-              ":Last-modified: TBD"  "\n"
-              ":Last-deleted: TBD"  "\n"
-              ":Last-sync: TBD"  "\n"
+              ":last-query: " query "\n"            
+              ":last-modified: TBD"  "\n"
+              ":last-deleted: TBD"  "\n"
+              ":last-sync: " (format "%d" (float-time (current-time))) "\n"
               ":END:\n")
       (insert (mapconcat 'slack-rtm-tasks-to-string task-list "\n"))      
       (display-buffer slack-buffer)
@@ -141,7 +143,7 @@
          (not (null (cdr (assq 'undoable attrs)))))))
 
 (defun slack-rtm-push-task (task)
-;;; TODO: so many requests just to update???
+;;; TODO: so many requests just to update???  eeek
   (let ((list-id (slack-rtm-task-list-id task))
         (taskseries-id (slack-rtm-task-taskseries-id task))
         (id (slack-rtm-task-id task))
@@ -303,6 +305,35 @@ by the rtm package. `rtm-tasks-get-list'"
     (org-entry-put (point)
                    "sync" (format "%d" (float-time (current-time))))))
 
+(defun slack-rtm-move-task ()
+  "Move the current task to a different list"
+  (interactive)
+  (let* ((list-id (slack-rtm-get-list))
+        (result (slack-rtm-move-task-to-list (slack-rtm-parse-current-task) list-id)))
+  (when (slack-rtm-success-p result)
+    (slack-rtm-update-current-task result)
+    (message "Task moved."))))
+
+(defun slack-rtm-move-task-to-list (task list-id)
+  (message list-id)
+  (let* ((result (rtm-tasks-move-to (slack-rtm-task-list-id task) list-id
+                                    (slack-rtm-task-taskseries-id task)
+                                    (slack-rtm-task-id task))))
+    result))
+
+(defun slack-rtm-get-list ()
+  "Propmpt the user for a list"
+  (let ((slack-rtm-list-lookup
+         (delq nil
+               (mapcar (lambda (node)
+                         (if (string= (xml-get-attribute node 'smart) "0")
+                             `(,(xml-get-attribute node 'name)
+                               ,(xml-get-attribute node 'id))))
+                                       (rtm-lists-get-list)))))
+    (cadr (assoc (ido-completing-read "List? "
+                                      (mapcar 'car slack-rtm-list-lookup))
+                 slack-rtm-list-lookup))))
+
 (defun slack-rtm-touch-task ()
   "Update the current task's timestamp so that it's included in the next sync."
   (interactive)
@@ -319,6 +350,11 @@ by the rtm package. `rtm-tasks-get-list'"
             (float-time
              (apply 'encode-time
                     (parse-time-string fixed-time-string))))))
+
+(defun slack-rtm-get-last-query ()
+  "Get the last query used for this org file"
+  (org-entry-get (point)
+                  "last-query" t))
 
 (defmacro slack-rtm-task-prop-defun (field)
   `(defun ,(intern (concat "slack-rtm-task-" field)) (task)
