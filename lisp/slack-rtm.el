@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2010 Seth Mason
 
-;; Author: Seth Mason 
+;; Author: Seth Mason
 ;; Created: 18 August 2010
 ;; Version: 0.0
 ;; Keywords: remember the milk productivity todo
@@ -51,9 +51,9 @@
 (defconst slack-rtm-buffer-name "*todo*"
   "Name for the buffer where tasks are written")
 
-(defun slack-rtm-get-tasks (query)
+(defun slack-rtm-get-tasks (query &optional last-sync)
   "Get the tasks from rtm."
-  (rtm-tasks-get-list nil query))
+  (rtm-tasks-get-list nil query last-sync))
 
 (defun slack-rtm (query)
   "Create the `slack-rtm-buffer-name' and fill it with takss from RTM"
@@ -66,12 +66,10 @@
       (insert "#+STARTUP: content\n\n"
               "* Remember The Milk -- " query "\n"
               ":PROPERTIES:\n"
-              ":last-query: " query "\n"            
-              ":last-modified: TBD"  "\n"
-              ":last-deleted: TBD"  "\n"
+              ":last-query: " query "\n"
               ":last-sync: " (format "%d" (float-time (current-time))) "\n"
               ":END:\n")
-      (insert (mapconcat 'slack-rtm-tasks-to-string task-list "\n"))      
+      (insert (mapconcat 'slack-rtm-tasks-to-string task-list "\n"))
       (display-buffer slack-buffer)
       (org-mode))))
 
@@ -80,23 +78,28 @@
   (let ((title (slack-rtm-task-title task))
         (priority (slack-rtm-task-priority task))
         (deadline (slack-rtm-task-deadline task))
-        (tags (slack-rtm-task-tags task)))
-    
+        (scheduled (slack-rtm-task-scheduled task))
+        (tags (slack-rtm-task-tags task))
+        (url (slack-rtm-task-url task)))
     (if (not (null title))
         (slack-rtm-task-quickadd
          (concat
           title
-          (when deadline
-            (concat " ^" deadline " "))
+          (if (or deadline scheduled)
+              (if (null deadline)
+                  (concat " ^" scheduled " ")
+                (concat " ^" deadline)))
           (when tags
             (concat " #" (mapconcat 'identity tags " #")))
+          (when url
+            (concat " " url))
           (when priority
             (concat " !"
                     (cond
                      ((equal priority "[#A]")
                       "1")
                      ((equal priority "[#B]")
-                      "2")                 
+                      "2")
                      ((equal priority "[#C]")
                       "3")))))))))
 
@@ -117,7 +120,9 @@
              (list-id (org-entry-get (point)
                                      "rtm-list-id"))
              (taskseries-id (org-entry-get (point)
-                                           "rtm-taskseries-id")))
+                                           "rtm-taskseries-id"))
+             (url (org-entry-get (point)
+                                 "url")))
         (if id (add-to-list 'info (cons "id" id)))
         (when tags
           (setq tags  (split-string tags ":" t)))
@@ -130,9 +135,16 @@
                (cons "priority" priority)
                (cons "tags" tags)
                (cons "status" status)))
+        (when url
+          (setq info (cons (cons "url" url)
+                           info)))
         (when (org-entry-get nil "DEADLINE")
           (setq info (cons (cons "deadline"
                                  (substring (org-entry-get nil "DEADLINE")
+                                            0 10)) info)))
+        (when (org-entry-get nil "SCHEDULED")
+          (setq info (cons (cons "scheduled"
+                                 (substring (org-entry-get nil "SCHEDULED")
                                             0 10)) info)))
         info))))
 
@@ -147,14 +159,16 @@
   (let ((list-id (slack-rtm-task-list-id task))
         (taskseries-id (slack-rtm-task-taskseries-id task))
         (id (slack-rtm-task-id task))
+        (title (slack-rtm-task-title task))
         (tags (slack-rtm-task-tags task)))
     (if (string= (slack-rtm-task-status task)
-                 "DONE")        
+                 "DONE")
         (rtm-tasks-complete list-id taskseries-id id)
       (rtm-tasks-uncomplete list-id taskseries-id id))
     (when tags
       (rtm-tasks-set-tags list-id taskseries-id id
-                          (concat " #" (mapconcat 'identity tags " #"))))))
+                          (concat " #" (mapconcat 'identity tags " #"))))
+    (rtm-tasks-set-name list-id taskseries-id id title)))
 
 (defun slack-rtm-sync-task (&optional force)
   "Update RTM or add task for the current task"
@@ -196,6 +210,92 @@
                 (message "Task deleted."))
             (message "Problem deleting task.")))))))
 
+(defun slack-rtm-pull ()
+  "Insert new tasks and update previous tasks."
+  (interactive)
+  (let ((tasks (slack-rtm-get-tasks (org-entry-get-with-inheritance
+                                     "last-query")
+                                    (slack-rtm-utc-string-to-8601-date
+                                     (org-entry-get-with-inheritance
+                                      "last-sync"))))
+        processed deleted)
+    
+
+    (mapc (lambda (task-list)
+            (mapc (lambda (deleted-list)
+                    (mapc (lambda (taskseries)
+                            (mapc (lambda (task)
+                                    (let ((list-id (xml-get-attribute
+                                                    task-list 'id))
+                                          (taskseries-id (xml-get-attribute
+                                                          taskseries 'id))
+                                          (task-id (xml-get-attribute task
+                                                                      'id)))
+                                      (if (slack-rtm-find-task list-id
+                                                               taskseries-id
+                                                               task-id)
+                                          (progn
+                                            (org-back-to-heading t)
+                                            (delete-region
+                                             (point)
+                                             (if (and (end-of-line)
+                                                      (re-search-forward org-complex-heading-regexp nil t))
+                                                 (match-beginning 0)
+                                               (org-end-of-subtree t t)
+                                               (point)))
+                                            (setq deleted (append (list
+                                                                   (slack-rtm-get-slack-id
+                                                                    list-id
+                                                                    taskseries-id
+                                                                    task-id))
+                                                                  deleted))))))
+                                  
+                                  (xml-get-children taskseries 'task))
+                            ) (xml-get-children deleted-list 'taskseries))
+                    
+                    ) (xml-get-children task-list 'deleted))
+            
+            ;; then do the modified tasks            
+            (mapc (lambda (taskseries)
+                    (mapc (lambda (task)
+                            (let ((list-id (xml-get-attribute task-list 'id))
+                                  (taskseries-id (xml-get-attribute taskseries
+                                                                    'id))
+                                  (task-id (xml-get-attribute task 'id)))
+                              ;; if we find it update it (if needed)
+                              (if (slack-rtm-find-task list-id taskseries-id
+                                                       task-id)
+                                  (slack-rtm-update-task task-list
+                                                         taskseries
+                                                         task)                                  
+                                ;; not found so add it at end
+                                (slack-rtm-create-task task-list taskseries
+                                                  task))
+                              ;; keep track of what we added
+                              (setq processed (append (list
+                                                       (slack-rtm-get-slack-id
+                                                        list-id taskseries-id
+                                                        task-id))
+                                                      processed))))
+                          (xml-get-children taskseries 'task)))
+                  (xml-get-children task-list 'taskseries)))
+          tasks)
+    
+    ;; ;; now update the last-sync
+    ;; (goto-char (point-min))
+    ;; (when (re-search-forward (concat "^\\(" outline-regexp "\\)") nil t)
+    ;;   (org-entry-put (point)
+    ;;                  "last-sync"
+    ;;                  (format "%d" (float-time (current-time)))))
+    (if (or tasks deleted)
+        (message (format "%d task(s) updated. %d task(s) deleted."
+                                 (length processed) (length deleted)))
+      (message "No tasks changed lately."))
+    
+;;; TODO: what happens to deleted tasks if they aren't returned by `last-query'
+    ;;; (format-time-string "%Y%m%dT%H:%M:%S" (current-time)))
+    ))
+
 (defun slack-rtm-task-quickadd (text)
   "Quickly add a task to RTM"
   (interactive "MTask: ")
@@ -223,6 +323,8 @@ by the rtm package. `rtm-tasks-get-list'"
          (name (xml-get-attribute taskseries 'name))
          (priority (slack-rtm-priority-to-org (xml-get-attribute task
                                                                  'priority)))
+         (taskseries-id (xml-get-attribute taskseries 'id))
+         (task-id (xml-get-attribute task 'id))
          (due-date (xml-get-attribute task 'due)))
     (concat (make-string (or level 2) ?*)
             " "
@@ -243,14 +345,18 @@ by the rtm package. `rtm-tasks-get-list'"
                        (xml-get-children taskseries
                                          'notes) "\n")
             ":PROPERTIES:\n"
-            ":rtm-task-id: " (xml-get-attribute task 'id) "\n"
-            ":rtm-taskseries-id: " (xml-get-attribute taskseries 'id) "\n"
-            ":rtm-list-id: "  list-id "\n" 
+            ":slack-id: " (slack-rtm-get-slack-id list-id taskseries-id
+                                                  task-id) "\n"
+            ":rtm-task-id: " task-id "\n"
+            ":rtm-taskseries-id: " taskseries-id "\n"
+            ":rtm-list-id: "  list-id "\n"
             ":modified: " (slack-rtm-fix-8601 (xml-get-attribute taskseries
-                                                                 'modified)) "\n"
-                                                                 ":sync: " (format "%d" (float-time (current-time))) "\n"
-                                                                 ":END:\n"))
-  )
+                                                                 'modified))
+            "\n"
+            (when (not (string= (xml-get-attribute taskseries 'url) ""))
+              (concat ":url: "  (xml-get-attribute taskseries 'url) "\n"))
+            ":END:\n")))
+
 
 (defun slack-rtm-taskseries-tags (taskseries)
   (let ((tags (xml-get-children (car (xml-get-children taskseries 'tags))
@@ -296,14 +402,17 @@ by the rtm package. `rtm-tasks-get-list'"
   "Update the org task at point with properties from result"
   (let* ((task-list (assq 'list result))
          (taskseries (car (xml-get-children task-list 'taskseries)))
-         (task (assq 'task taskseries)))
-    (org-entry-put (point) "rtm-list-id" (xml-get-attribute task-list 'id))
-    (org-entry-put (point) "rtm-taskseries-id" (xml-get-attribute taskseries 'id))
-    (org-entry-put (point) "rtm-task-id" (xml-get-attribute task 'id))
-    (org-entry-put (point) "modified" (slack-rtm-fix-8601 (xml-get-attribute taskseries
-                                                                             'modified)))
+         (task (assq 'task taskseries))
+         (list-id (xml-get-attribute task-list 'id))
+         (taskseries-id (xml-get-attribute taskseries 'id))
+         (task-id (xml-get-attribute task 'id)))
     (org-entry-put (point)
-                   "sync" (format "%d" (float-time (current-time))))))
+                   "slack-id" (slack-rtm-get-slack-id list-id taskseries-id task-id))
+    (org-entry-put (point) "rtm-list-id" list-id)
+    (org-entry-put (point) "rtm-taskseries-id" taskseries-id)
+    (org-entry-put (point) "rtm-task-id" task-id)
+    (org-entry-put (point) "modified" (slack-rtm-fix-8601 (xml-get-attribute taskseries
+                                                                             'modified)))))
 
 (defun slack-rtm-move-task ()
   "Move the current task to a different list"
@@ -315,7 +424,6 @@ by the rtm package. `rtm-tasks-get-list'"
     (message "Task moved."))))
 
 (defun slack-rtm-move-task-to-list (task list-id)
-  (message list-id)
   (let* ((result (rtm-tasks-move-to (slack-rtm-task-list-id task) list-id
                                     (slack-rtm-task-taskseries-id task)
                                     (slack-rtm-task-id task))))
@@ -340,6 +448,34 @@ by the rtm package. `rtm-tasks-get-list'"
   (org-entry-put (point) "modified" (format "%d" (float-time
                                                   (current-time)))))
 
+(defun slack-rtm-create-task (task-list taskseries task)
+  "Create the org version of the RTM task"
+  (goto-char (point-max))
+  (if (point-at-eol)
+      (insert "\n"))
+  (insert (slack-rtm-task-to-string task-list taskseries task)))
+
+(defun slack-rtm-update-task (task-list taskseries task)
+  "Update the org version of the RTM task (if needed)"
+  (let* ((local-modified (string-to-number (or (org-entry-get (point)
+                                                              "modified")
+                                              "")))
+        (server-modified (string-to-number (slack-rtm-fix-8601 (xml-get-attribute taskseries
+                                                                 'modified))))
+        (level (car (org-heading-components)))
+        (is-locally-modified-p (> local-modified server-modified)))
+    (if is-locally-modified-p
+        nil
+      ;; not locally modified so replace it with server version
+      (delete-region (org-back-to-heading)
+                     (progn (goto-char (match-end 0))
+                            (if (re-search-forward org-complex-heading-regexp
+                                                   nil t)
+                                (goto-char (match-beginning 0))
+                              (org-end-of-subtree))))
+      (insert (slack-rtm-task-to-string task-list taskseries task level))
+      t)))
+
 (defun slack-rtm-fix-8601 (time-string)
   "This is admittedly goofy and doesn't really 'fix' anything."
   (let ((fixed-time-string
@@ -350,6 +486,21 @@ by the rtm package. `rtm-tasks-get-list'"
             (float-time
              (apply 'encode-time
                     (parse-time-string fixed-time-string))))))
+
+(defun slack-rtm-utc-string-to-8601-date (value)
+  "Convert a epoch time to 8601 date"
+  (format-time-string "%Y-%m-%dT%H:%M:%SZ" (seconds-to-time (string-to-number
+                                                             value))))
+(defun slack-rtm-find-task (list-id taskseries-id task-id)
+  (goto-char (point-min))
+    (re-search-forward
+     (concat "^[ \t]*:slack-id:[ \t]+" (slack-rtm-get-slack-id list-id
+                                                             taskseries-id task-id) "$")
+     nil t))
+
+(defun slack-rtm-get-slack-id (list-id taskseries-id task-id)
+  "Get the internal id"
+  (concat list-id "-" taskseries-id "-" task-id))
 
 (defun slack-rtm-get-last-query ()
   "Get the last query used for this org file"
@@ -367,7 +518,9 @@ by the rtm package. `rtm-tasks-get-list'"
 (slack-rtm-task-prop-defun "status")
 (slack-rtm-task-prop-defun "title")
 (slack-rtm-task-prop-defun "deadline")
+(slack-rtm-task-prop-defun "scheduled")
 (slack-rtm-task-prop-defun "tags")
+(slack-rtm-task-prop-defun "url")
 
 (provide 'slack-rtm)
 
