@@ -170,6 +170,28 @@
                           (concat " #" (mapconcat 'identity tags " #"))))
     (rtm-tasks-set-name list-id taskseries-id id title)))
 
+(defun slack-rtm-push (&optional processed)
+  "Push all locally modified tasks but skip the ones in `processed'."
+  (interactive)
+  (goto-char (point-min))
+  (let ((start (float-time (current-time))))
+    (while (re-search-forward org-complex-heading-regexp nil t)
+      (if (match-string 2)
+          (let ((id (org-entry-get (point)
+                                   "slack-id"))
+                (modified (string-to-number (or (org-entry-get (point)
+                                                                "modified")
+                                                 "")))
+                (last-sync (string-to-number (or (org-entry-get-with-inheritance
+                                           "last-sync") ""))))
+            (if (or (null id)
+                    (and (> modified last-sync)
+                         (not (member id processed))))
+                (progn
+                  (save-excursion (slack-rtm-sync-task))
+                  t)
+              nil))))))
+
 (defun slack-rtm-sync-task (&optional force)
   "Update RTM or add task for the current task"
   (interactive "P")
@@ -210,7 +232,7 @@
                 (message "Task deleted."))
             (message "Problem deleting task.")))))))
 
-(defun slack-rtm-pull ()
+(defun slack-rtm-sync ()
   "Insert new tasks and update previous tasks."
   (interactive)
   (let ((tasks (slack-rtm-get-tasks (org-entry-get-with-inheritance
@@ -219,8 +241,6 @@
                                      (org-entry-get-with-inheritance
                                       "last-sync"))))
         processed deleted)
-    
-
     (mapc (lambda (task-list)
             (mapc (lambda (deleted-list)
                     (mapc (lambda (taskseries)
@@ -239,7 +259,8 @@
                                             (delete-region
                                              (point)
                                              (if (and (end-of-line)
-                                                      (re-search-forward org-complex-heading-regexp nil t))
+                                                      (re-search-forward
+                                                       org-complex-heading-regexp nil t))
                                                  (match-beginning 0)
                                                (org-end-of-subtree t t)
                                                (point)))
@@ -249,13 +270,13 @@
                                                                     taskseries-id
                                                                     task-id))
                                                                   deleted))))))
-                                  
+
                                   (xml-get-children taskseries 'task))
                             ) (xml-get-children deleted-list 'taskseries))
-                    
+
                     ) (xml-get-children task-list 'deleted))
-            
-            ;; then do the modified tasks            
+
+            ;; then do the modified tasks
             (mapc (lambda (taskseries)
                     (mapc (lambda (task)
                             (let ((list-id (xml-get-attribute task-list 'id))
@@ -265,36 +286,43 @@
                               ;; if we find it update it (if needed)
                               (if (slack-rtm-find-task list-id taskseries-id
                                                        task-id)
-                                  (slack-rtm-update-task task-list
+                                  (progn
+                                    (when
+                                        (slack-rtm-update-task task-list
                                                          taskseries
-                                                         task)                                  
+                                                         task)
+                                    (setq processed (append (list
+                                                             (slack-rtm-get-slack-id
+                                                              list-id taskseries-id
+                                                              task-id))
+                                                            processed))))
                                 ;; not found so add it at end
                                 (slack-rtm-create-task task-list taskseries
-                                                  task))
-                              ;; keep track of what we added
-                              (setq processed (append (list
-                                                       (slack-rtm-get-slack-id
-                                                        list-id taskseries-id
-                                                        task-id))
-                                                      processed))))
+                                                  task)
+                                (setq processed (append (list
+                                                         (slack-rtm-get-slack-id
+                                                          list-id taskseries-id
+                                                          task-id))
+                                                        processed)))))
                           (xml-get-children taskseries 'task)))
                   (xml-get-children task-list 'taskseries)))
           tasks)
-    
-    ;; ;; now update the last-sync
-    ;; (goto-char (point-min))
-    ;; (when (re-search-forward (concat "^\\(" outline-regexp "\\)") nil t)
-    ;;   (org-entry-put (point)
-    ;;                  "last-sync"
-    ;;                  (format "%d" (float-time (current-time)))))
+
+    ;; now go through and handle the locally modified ones
+    (slack-rtm-push processed)
+
+    ;;; TODO: Add tasks that are pushed to the processed list for output below?
+
+    ;; now update the last-sync
+    (goto-char (point-min))
+    (when (re-search-forward (concat "^\\(" outline-regexp "\\)") nil t)
+      (org-entry-put (point)
+                     "last-sync"
+                     (format "%d" (float-time (current-time)))))
     (if (or tasks deleted)
         (message (format "%d task(s) updated. %d task(s) deleted."
                                  (length processed) (length deleted)))
-      (message "No tasks changed lately."))
-    
-;;; TODO: what happens to deleted tasks if they aren't returned by `last-query'
-    ;;; (format-time-string "%Y%m%dT%H:%M:%S" (current-time)))
-    ))
+      (message "No tasks changed on RTM."))))
 
 (defun slack-rtm-task-quickadd (text)
   "Quickly add a task to RTM"
@@ -463,7 +491,7 @@ by the rtm package. `rtm-tasks-get-list'"
         (server-modified (string-to-number (slack-rtm-fix-8601 (xml-get-attribute taskseries
                                                                  'modified))))
         (level (car (org-heading-components)))
-        (is-locally-modified-p (> local-modified server-modified)))
+        (is-locally-modified-p (>= local-modified server-modified)))
     (if is-locally-modified-p
         nil
       ;; not locally modified so replace it with server version
